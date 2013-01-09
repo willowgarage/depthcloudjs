@@ -1,19 +1,21 @@
 (function (root, factory) {
   if (typeof define === 'function' && define.amd) {
-    define(['eventemitter2'], factory);
+    define(['eventemitter2','./tfclient'], factory);
   }
   else {
-    root.ImProxy = factory(root.EventEmitter2);
+    root.ImProxy = factory(root.EventEmitter2,root.TfClient);
   }
-}(this, function (EventEmitter2) {
+}(this, function (EventEmitter2, TfClient) {
 
   var ImProxy = {};
 
-  var Client = ImProxy.Client = function(ros) {
+  var Client = ImProxy.Client = function(ros,tf) {
     this.ros = ros;
-    this.interactiveMarkers = {};
+    this.tf = tf;
+    this.intMarkerHandles = {};
     this.clientId = "improxy.js " + Math.round( Math.random() * 1000000 );
   };
+
   Client.prototype.__proto__ = EventEmitter2.prototype;
 
   Client.prototype.subscribe = function(topicName) {
@@ -23,57 +25,63 @@
       name : topicName + '/tunneled/update',
       messageType : 'visualization_msgs/InteractiveMarkerUpdate'
     });
-    this.markerUpdateTopic.subscribe(this.markerUpdate.bind(this));
+    this.markerUpdateTopic.subscribe(this.processUpdate.bind(this));
 
     this.feedbackTopic = new this.ros.Topic({
       name : topicName + '/feedback',
       messageType : 'visualization_msgs/InteractiveMarkerFeedback'
     });
     this.feedbackTopic.advertise();
-    
+
     this.initService = new this.ros.Service({
         name        : topicName + '/tunneled/get_init'
       , serviceType : 'demo_interactive_markers/GetInit'
     });
     var request = new this.ros.ServiceRequest({});
-    this.initService.callService(request, this.markerInit.bind(this));
+    this.initService.callService(request, this.processInit.bind(this));
   };
-  
-  Client.prototype.deleteMarker = function(markerName) {
-    this.emit('deleted_marker', markerName);
-    delete this.interactiveMarkers[markerName];
-  }
-  
+
   Client.prototype.unsubscribe = function() {
     if ( this.markerUpdateTopic ) {
       this.markerUpdateTopic.unsubscribe();
       this.feedbackTopic.unadvertise();
     }
-    for( markerName in this.interactiveMarkers ) {
-      this.deleteMarker(markerName);
+    for( intMarkerName in this.intMarkerHandles ) {
+      this.eraseIntMarker(intMarkerName);
     }
-    this.interactiveMarkers = {};
-  }
-  
-  Client.prototype.markerInit = function(initMessage) {
-    var message = initMessage.msg;
-    message.erases = [];
-    message.poses = [];
-    this.markerUpdate(message);
+    this.intMarkerHandles = {};
   }
 
-  Client.prototype.markerUpdate = function(message) {
+  Client.prototype.eraseIntMarker = function(intMarkerName) {
+    if ( this.intMarkerHandles[intMarkerName] ) {
+      this.emit('deleted_marker', intMarkerName);
+      delete this.intMarkerHandles[intMarkerName];
+    }
+  }
+
+  Client.prototype.processInit = function(initMessage) {
+    var message = initMessage.msg;
+    var client = this;
+    message.erases = [];
+    for( intMarkerName in this.intMarkerHandles ) {
+      message.erases.push( intMarkerName );
+    };
+    message.poses = [];
+    this.processUpdate(message);
+  }
+
+  Client.prototype.processUpdate = function(message) {
     var that = this;
 
     // Deletes markers
     message.erases.forEach(function(name) {
-      var marker = that.interactiveMarkers[name];
-      that.deleteMarker(name);
+      var marker = that.intMarkerHandles[name];
+      that.eraseIntMarker(name);
     });
 
     // Updates marker poses
     message.poses.forEach(function(poseMessage) {
-      var marker = that.interactiveMarkers[poseMessage.name];
+      var marker = that.intMarkerHandles[poseMessage.name];
       if (marker) {
         marker.setPoseFromServer(poseMessage.pose);
       }
@@ -81,30 +89,36 @@
 
     // Adds new markers
     message.markers.forEach(function(imMsg) {
-      var oldMarker = that.interactiveMarkers[imMsg.name];
-      if (oldMarker) {
-        that.deleteMarker(oldMarker.name);
+      var oldIntMarkerHandle = that.intMarkerHandles[imMsg.name];
+      if (oldIntMarkerHandle) {
+        that.eraseIntMarker(oldIntMarkerHandle.name);
       }
 
-      var marker = new ImProxy.IntMarkerHandle(imMsg, that.feedbackTopic);
-      that.interactiveMarkers[imMsg.name] = marker;
-      that.emit('created_marker', marker);
+      var intMarkerHandle = new ImProxy.IntMarkerHandle(imMsg, that.feedbackTopic, that.tf);
+      that.intMarkerHandles[imMsg.name] = intMarkerHandle;
+      that.emit('created_marker', intMarkerHandle);
+      // this might trigger a transform update event immediately,
+      // so we need to call it after emitting a created_marker event.
+      intMarkerHandle.subscribeTf(imMsg);
     });
   };
-  
+
   /* Handle with signals for a single interactive marker */
 
-  var IntMarkerHandle = ImProxy.IntMarkerHandle = function(imMsg, feedbackTopic) {
-    this.feedbackTopic = feedbackTopic;
-    this.pose     = imMsg.pose;
-    this.name     = imMsg.name;
-    this.header   = imMsg.header;
-    this.controls = imMsg.controls;
-    this.menuEntries = imMsg.menu_entries;
-    this.dragging = false;
-    this.timeoutHandle = null;
+  var IntMarkerHandle = ImProxy.IntMarkerHandle = function(imMsg, feedbackTopic, tf) {
+    this.feedbackTopic  = feedbackTopic;
+    this.tf             = tf;
+    this.name           = imMsg.name;
+    this.header         = imMsg.header;
+    this.controls       = imMsg.controls;
+    this.menuEntries    = imMsg.menu_entries;
+    this.dragging       = false;
+    this.timeoutHandle  = null;
+    this.tfTransform    = new TfClient.Transform();
+    this.pose           = new TfClient.Pose();
+    this.setPoseFromServer( imMsg.pose );
   };
-  
+
   IntMarkerHandle.prototype.__proto__ = EventEmitter2.prototype;
 
   var KEEP_ALIVE = 0;
@@ -113,29 +127,33 @@
   var BUTTON_CLICK = 3;
   var MOUSE_DOWN = 4;
   var MOUSE_UP = 5;
-  
+
+  IntMarkerHandle.prototype.subscribeTf = function(imMsg) {
+    // subscribe to tf updates if frame-fixed
+    if ( imMsg.header.stamp.secs === 0.0 && imMsg.header.stamp.nsecs === 0.0 ) {
+      this.tf.subscribe( imMsg.header.frame_id, this.tfUpdate.bind(this) );
+    }
+  }
+
+  IntMarkerHandle.prototype.emitServerPoseUpdate = function() {
+    var poseTransformed = new TfClient.Pose( this.pose.position, this.pose.orientation );
+    this.tfTransform.apply( poseTransformed );
+    this.emit('server_updated_pose', poseTransformed );
+  }
+
   IntMarkerHandle.prototype.setPoseFromServer = function(poseMsg) {
-    this.pose.position = poseMsg.position;
-    this.pose.orientation = poseMsg.orientation;
-    this.emit('server_updated_pose', poseMsg);
+    this.pose.copy( poseMsg );
+    this.emitServerPoseUpdate();
+  };
+
+  IntMarkerHandle.prototype.tfUpdate = function(transformMsg) {
+    this.tfTransform.copy( transformMsg );
+    this.emitServerPoseUpdate();
   };
 
   IntMarkerHandle.prototype.setPoseFromClient = function(event) {
-    function clonePose( pose ) {
-      var clone = {
-        position: {},
-        orientation: {}
-      };
-      clone.position.x = pose.position.x;
-      clone.position.y = pose.position.y;
-      clone.position.z = pose.position.z;
-      clone.orientation.x = pose.orientation.x;
-      clone.orientation.y = pose.orientation.y;
-      clone.orientation.z = pose.orientation.z;
-      clone.orientation.w = pose.orientation.w;
-      return clone;
-    }
-    this.pose = clonePose(event);
+    this.pose.copy(event);
+    this.tfTransform.applyInverse( this.pose );
     this.emit('client_updated_pose', event);
     this.sendFeedback(POSE_UPDATE, undefined, 0, event.controlName);
 
@@ -145,7 +163,7 @@
         clearTimeout(this.timeoutHandle);
       }
       this.timeoutHandle = setTimeout( this.setPoseFromClient.bind(this,event), 250 );
-    } 
+    }
   };
 
   IntMarkerHandle.prototype.onButtonClick = function(event) {
@@ -170,7 +188,7 @@
   }
 
   IntMarkerHandle.prototype.sendFeedback = function(eventType, clickPosition, menu_entry_id, controlName) {
-    
+
     var mouse_point_valid = clickPosition !== undefined;
     var clickPosition = clickPosition || {
       x : 0,

@@ -1,7 +1,7 @@
 InteractiveMarkerDisplay=new (function(THREE) {
 
   var camera, cameraControls, scene, renderer;
-  
+
   var selectableObjs;
 
   var directionalLight;
@@ -74,32 +74,33 @@ InteractiveMarkerDisplay=new (function(THREE) {
     var rosUrl = "ws://"+window.location.hostname+':9099';
     console.log("Connecting to ROS at ", rosUrl );
     var ros = new ROS(rosUrl);
-    
+
     var meshBaseUrl = "http://"+window.location.hostname+':8000/resources/';
     console.log("Getting meshes from ", meshBaseUrl );
 
     // show interactive markers
     imClient = new ImProxy.Client(ros);
     imViewer = new ImThree.Viewer(selectableObjs, camera, imClient, meshBaseUrl);
-    
+
     var depthNode = new THREE.Object3D;
     scene.add(depthNode);
 
     cloudStream = new DepthCloud.Viewer({
-      url : '../../streams/depth_color_combined.webm?',
-      shaderUrl: '../',
-      sceneNode : depthNode
+      url : "http://"+window.location.hostname+':8888/streams/webGL_pointcloud_image_encoder/depth_color_combined.webm?',
+      sceneNode : depthNode,
+      f : 505.0,
+      shaderUrl: '../'
     });
-    
+
     cloudStream.startStream();
-    
+
     var tfClient = new TfClient( {
       ros: ros,
       fixedFrame: 'base_link',
       angularThres: 2.0,
       transThres: 0.01
     } );
-    
+
     tfClient.subscribe('head_mount_kinect_rgb_optical_frame',function(transform){
       //console.log(transform);
 
@@ -121,9 +122,9 @@ InteractiveMarkerDisplay=new (function(THREE) {
       axes.quaternion.z = transform.rotation.z;
       axes.quaternion.w = transform.rotation.w;
     });
-    
+
   }
-  
+
   this.subscribe = function( topic ) {
     imClient.subscribe(topic);
   }
