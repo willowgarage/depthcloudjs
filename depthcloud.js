@@ -37,8 +37,7 @@ function (THREE) {
 
         this.video.loop = true;
         this.video.src = this.url;
-        this.video.crossOrigin = 'use-credentials';
-
+        this.video.crossOrigin = "Anonymous";
         // ///////////////////////////
         // load shaders
         // ///////////////////////////
@@ -133,7 +132,7 @@ function (THREE) {
             this.sceneNode.add(this.mesh);
 
             var that = this;
-            
+
             setInterval( function () {
                 if (that.video.readyState === that.video.HAVE_ENOUGH_DATA) {
                     that.texture.needsUpdate = true;
